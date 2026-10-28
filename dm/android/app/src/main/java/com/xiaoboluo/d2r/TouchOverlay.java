@@ -75,7 +75,12 @@ public final class TouchOverlay extends View {
         this.menuLabels = menuLabels == null ? new String[5] : menuLabels.clone();
         lifeFormat=context.getString(R.string.dmHudLife); manaFormat=context.getString(R.string.dmHudMana);
         levelFormat=context.getString(R.string.dmAndroidHudLevel); cancelLabel=context.getString(R.string.dmTcCancel);
-        overlayRoot=new File(context.getFilesDir(),"dm/overlay");
+        // 与 DmActivity / jni_android.c 选运行目录同一条规则：内部目录有主程序就用内部，否则用外部私有目录（开发时直接推进来的导入包在那里）
+        // Same rule as DmActivity / jni_android.c for the runtime directory: internal storage when it has the main module, otherwise external private
+        // storage (where an import pack pushed directly during development lives)
+        File internal=new File(context.getFilesDir(),"dm"), ext=context.getExternalFilesDir(null);
+        File runtime=new File(internal,"out/main.patched.bin").canRead() || ext==null ? internal : new File(ext,"dm");
+        overlayRoot=new File(runtime,"overlay");
         setWillNotDraw(false);
         setFocusable(false);
         setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
