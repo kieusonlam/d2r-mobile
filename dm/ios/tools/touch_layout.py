@@ -1157,7 +1157,14 @@ def _settings_tabs(text):
     # 第四项「自定义」同理：原版串 KeyBindingTypeCustom 的西语「Personalizar」在页签里被截成「Persona…」（西语截图），页签用我们表里的短词（页面大标题仍用原版串）
     # The fourth item "Custom" likewise: the original string KeyBindingTypeCustom in Spanish "Personalizar" is truncated to "Persona…" in the tab (Spanish screenshot), so the tab uses the short word from our table (the page heading still uses the original string)
     new = new.replace('"@Controls"', '"@dmTabCustom"').replace('SettingsPanelMessage:CheckChanges:KeyBindingMenu', 'SettingsPanelMessage:CheckChanges:VideoOptionsPanel')
-    return new, n + k + 1
+    return _settings_tab_width(new), n + k + 1
+# 选项页签宽 266 → 340：字号统一到 40 之后，英文 Gameplay 在 266 宽里折成「Gamepla / y」（RP5 截图）。四个页签 4 × 340 + 间隙 ≈ 1366，仍在左右 LT / RT 之间
+# Options tab width 266 → 340: with fonts unified at 40, English "Gameplay" wraps to "Gamepla / y" in 266 width (RP5 screenshot). Four tabs 4 × 340 + gaps ≈ 1366, still between the LT / RT glyphs
+SETTINGS_TAB_W = 340
+def _settings_tab_width(s):
+    s, k = re.subn(r'("tabCount"\s*:\s*\d+\s*,)', r'\1 "tabSize": { "x": %d, "y": 121 },' % SETTINGS_TAB_W, s, count=1)
+    if k != 1: raise SystemExit('touch_layout：选项页签条没有 tabCount（原版布局变了？）')
+    return s
 def _drop_rows(*rows):
     """把选项表里的整行（TableRowWidget "Row <名>"）删掉：表格按剩下的行重排，不留空行。每个名字必须恰好删到一行。 | Delete whole rows (TableRowWidget "Row <name>") from the options table: the table re-lays out the remaining rows and leaves no empty row. Each name must delete exactly one row."""
     def fn(text):
@@ -1304,7 +1311,8 @@ PRESENT['controller/console/videooptionspanelhd.json'] = _custom_page
 # 手柄版选项页：原版页签条不动，只把第一项「视频」换成「自定义」——它打开的视频页就是上面那份自定义页（两种模式同一份内容）
 # Controller options page: the original tab bar is untouched, only the first item "Video" is replaced by "Custom"; the video page it opens is the Custom
 # page above (same content in both modes)
-def pad_settings(s): return _sub1(s, '"@OptionsMenuVideo"', '"@KeyBindingTypeCustom"')   # 原版串：自定义 / Custom（跟游戏语言走） | original string: "Custom" in Chinese / English (follows the game language)
+def pad_settings(s):   # 页签用触屏版同一组短词（原版 Game Settings 放不进页签），页签同样加宽 | tabs use the same short words as the touch layout (the original Game Settings does not fit a tab), and are widened the same way
+    return _settings_tab_width(_sub1(_sub1(s, '"@OptionsMenuVideo"', '"@dmTabCustom"'), '"@GameSettingsTab"', '"@dmTabGameSettings"'))
 def pad_custom_page(s): return _custom_page(s)[0]
 # 挂进 PRESENT：build_ingame 对同一份文件（往选项页插「应用 / 默认 / 放弃」）会先套这里的变换再插按钮，不会出两份覆盖互相盖掉
 # Hooked into PRESENT: for the same file (inserting 「应用 / 默认 / 放弃」(Apply / Default / Discard) into the options page) build_ingame applies the transform here first and then inserts the buttons, so two overlays that overwrite each other are not produced
