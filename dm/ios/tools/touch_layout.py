@@ -1158,11 +1158,14 @@ def _settings_tabs(text):
     # The fourth item "Custom" likewise: the original string KeyBindingTypeCustom in Spanish "Personalizar" is truncated to "Persona…" in the tab (Spanish screenshot), so the tab uses the short word from our table (the page heading still uses the original string)
     new = new.replace('"@Controls"', '"@dmTabCustom"').replace('SettingsPanelMessage:CheckChanges:KeyBindingMenu', 'SettingsPanelMessage:CheckChanges:VideoOptionsPanel')
     return _settings_tab_width(new), n + k + 1
-# 选项页签宽 266 → 340：字号统一到 40 之后，英文 Gameplay 在 266 宽里折成「Gamepla / y」（RP5 截图）。四个页签 4 × 340 + 间隙 ≈ 1366，仍在左右 LT / RT 之间
-# Options tab width 266 → 340: with fonts unified at 40, English "Gameplay" wraps to "Gamepla / y" in 266 width (RP5 screenshot). Four tabs 4 × 340 + gaps ≈ 1366, still between the LT / RT glyphs
+# 选项页签宽 266 → 340：字号统一到 40 之后，英文 Gameplay 在 266 宽里折成「Gamepla / y」（RP5 截图）。四个页签 4 × 340 + 间隙 ≈ 1366，仍在左右 LT / RT 之间。
+# 页签底图是定宽贴图、不随 tabSize 伸缩，所以同时换成加宽的那张（options_tabs.py；储藏箱页签仍用原图）
+# Options tab width 266 → 340: with fonts unified at 40, English "Gameplay" wraps to "Gamepla / y" in 266 width (RP5 screenshot). Four tabs 4 × 340 + gaps ≈ 1366,
+# still between the LT / RT glyphs. The tab background is a fixed-width sprite that does not stretch with tabSize, so it is switched to the widened one as well
+# (options_tabs.py; the stash tabs keep the original)
 SETTINGS_TAB_W = 340
 def _settings_tab_width(s):
-    s, k = re.subn(r'("tabCount"\s*:\s*\d+\s*,)', r'\1 "tabSize": { "x": %d, "y": 121 },' % SETTINGS_TAB_W, s, count=1)
+    s, k = re.subn(r'("tabCount"\s*:\s*\d+\s*,)', r'\1 "tabSize": { "x": %d, "y": 121 }, "filename": "Controller/Panel/zswide/DMOptionTabs",' % SETTINGS_TAB_W, s, count=1)
     if k != 1: raise SystemExit('touch_layout：选项页签条没有 tabCount（原版布局变了？）')
     return s
 def _drop_rows(*rows):
