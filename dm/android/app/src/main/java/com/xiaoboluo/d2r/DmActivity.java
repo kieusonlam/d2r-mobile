@@ -9,6 +9,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.hardware.display.DisplayManager;
+import android.hardware.input.InputManager;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
@@ -20,6 +21,10 @@ import android.text.SpanWatcher;
 import android.text.Spannable;
 import android.text.Spanned;
 import android.text.TextWatcher;
+import android.util.SparseArray;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -48,6 +53,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeTouch(int n, int[] ids, float[] xs, float[] ys);
     static native void nativeFocus(int ev);
     static native void nativeTextResult(long id, boolean accepted, String text);
+    // 手柄（dm/android/gamepad_android.c）：每个设备的键位掩码与四轴（−1..1，上为正）；断开；失活清零
+    // Controller (dm/android/gamepad_android.c): each device's button mask and four axes (−1..1, up positive); removal; zeroing on pause
+    static native void nativePad(int device, long buttons, float lx, float ly, float rx, float ry);
+    static native void nativePadDrop(int device);
+    static native void nativePadReset();
 
     private static WeakReference<DmActivity> current = new WeakReference<>(null);
     private static volatile int bootFailure;
@@ -61,9 +71,12 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     private boolean libraryLoaded;
     private boolean resumed;
     private DisplayManager displays;
+    private InputManager inputs;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        inputs = getSystemService(InputManager.class);
+        if (inputs != null) inputs.registerInputDeviceListener(padDevices, null);
         // 调试包：am start … --ez dmArtDump true 只把触屏控件底图写到 files/dm/artdump/ 就退出（dm/android/tools/art_compare.sh 用）
         // Debug builds: am start … --ez dmArtDump true only writes the touch control art to files/dm/artdump/ and exits (used by dm/android/tools/art_compare.sh)
         if (BuildConfig.DEBUG && getIntent().getBooleanExtra("dmArtDump", false)) {
@@ -383,6 +396,89 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         if (started) nativeTouch(0, new int[0], new float[0], new float[0]);
     }
 
+    // ---- 手柄 | Controller ----
+    // 位与 gamepad_android.c 的 SYS_* 及 dm/host/dm_input.h 的 DM_BTN_* 相同。安卓的面键按位置给（KEYCODE_BUTTON_A = 下、B = 右、X = 左、
+    // Y = 上），原样交出，按 Xbox 键位换算在原生侧做。十字键与扳机既可能来自按键也可能来自轴（HAT_X/Y、LTRIGGER/BRAKE、RTRIGGER/GAS），两份取或。
+    // Bits equal gamepad_android.c's SYS_* and dm/host/dm_input.h's DM_BTN_*. Android reports face buttons by position (KEYCODE_BUTTON_A = bottom,
+    // B = right, X = left, Y = top); they are passed as they are and mapped to the Xbox layout natively. The d-pad and triggers may come as keys or as
+    // axes (HAT_X/Y, LTRIGGER/BRAKE, RTRIGGER/GAS); the two are ORed.
+    private static final long PAD_A = 1, PAD_B = 1 << 1, PAD_X = 1 << 2, PAD_Y = 1 << 3, PAD_LS = 1 << 4, PAD_RS = 1 << 5, PAD_L = 1 << 6, PAD_R = 1 << 7,
+        PAD_ZL = 1 << 8, PAD_ZR = 1 << 9, PAD_PLUS = 1 << 10, PAD_MINUS = 1 << 11, PAD_LEFT = 1 << 12, PAD_UP = 1 << 13, PAD_RIGHT = 1 << 14, PAD_DOWN = 1 << 15;
+    private static final class Pad { long keys, axisKeys; float lx, ly, rx, ry; }
+    private final SparseArray<Pad> pads = new SparseArray<>();
+    private final InputManager.InputDeviceListener padDevices = new InputManager.InputDeviceListener() {
+        @Override public void onInputDeviceAdded(int id) {}
+        @Override public void onInputDeviceChanged(int id) {}
+        @Override public void onInputDeviceRemoved(int id) { if (pads.get(id) != null) { pads.remove(id); if (started) nativePadDrop(id); } }
+    };
+    private static long padBit(int code) {
+        switch (code) {
+            case KeyEvent.KEYCODE_BUTTON_A: return PAD_A;
+            case KeyEvent.KEYCODE_BUTTON_B: return PAD_B;
+            case KeyEvent.KEYCODE_BUTTON_X: return PAD_X;
+            case KeyEvent.KEYCODE_BUTTON_Y: return PAD_Y;
+            case KeyEvent.KEYCODE_BUTTON_THUMBL: return PAD_LS;
+            case KeyEvent.KEYCODE_BUTTON_THUMBR: return PAD_RS;
+            case KeyEvent.KEYCODE_BUTTON_L1: return PAD_L;
+            case KeyEvent.KEYCODE_BUTTON_R1: return PAD_R;
+            case KeyEvent.KEYCODE_BUTTON_L2: return PAD_ZL;
+            case KeyEvent.KEYCODE_BUTTON_R2: return PAD_ZR;
+            case KeyEvent.KEYCODE_BUTTON_START: return PAD_PLUS;
+            case KeyEvent.KEYCODE_BUTTON_SELECT: return PAD_MINUS;
+            case KeyEvent.KEYCODE_DPAD_LEFT: return PAD_LEFT;
+            case KeyEvent.KEYCODE_DPAD_UP: return PAD_UP;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: return PAD_RIGHT;
+            case KeyEvent.KEYCODE_DPAD_DOWN: return PAD_DOWN;
+            default: return 0;
+        }
+    }
+    private static boolean isPad(InputDevice d) {
+        if (d == null) return false;
+        int s = d.getSources();
+        return (s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD || (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+    private Pad pad(int id) { Pad p = pads.get(id); if (p == null) { p = new Pad(); pads.put(id, p); } return p; }
+    private void sendPad(int id, Pad p) { nativePad(id, p.keys | p.axisKeys, p.lx, p.ly, p.rx, p.ry); }
+    private void releasePads() { pads.clear(); if (started) nativePadReset(); }
+    // 十字键只认手柄设备上的（键盘方向键不算）；面键等 isGamepadButton 的码不论来源
+    // D-pad keys only count from controller devices (keyboard arrows do not); isGamepadButton codes count from any source
+    @Override public boolean dispatchKeyEvent(KeyEvent e) {
+        int code = e.getKeyCode();
+        long bit = padBit(code);
+        if (bit != 0 && (KeyEvent.isGamepadButton(code) || isPad(e.getDevice()))) {
+            if (started && e.getRepeatCount() == 0) {
+                Pad p = pad(e.getDeviceId());
+                if (e.getAction() == KeyEvent.ACTION_DOWN) p.keys |= bit; else if (e.getAction() == KeyEvent.ACTION_UP) p.keys &= ~bit;
+                sendPad(e.getDeviceId(), p);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(e);
+    }
+    private static float stickAxis(MotionEvent e, InputDevice d, int axis, int fallback) {
+        boolean useFallback = d != null && d.getMotionRange(axis, e.getSource()) == null && d.getMotionRange(fallback, e.getSource()) != null;
+        return e.getAxisValue(useFallback ? fallback : axis);
+    }
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK && e.getAction() == MotionEvent.ACTION_MOVE) {
+            if (started) {
+                InputDevice d = e.getDevice();
+                Pad p = pad(e.getDeviceId());
+                // 摇杆：安卓下为正，宿主上为正；右摇杆多为 Z/RZ，少数为 RX/RY | Sticks: Android is down-positive, the host up-positive; the right stick is usually Z/RZ, sometimes RX/RY
+                p.lx = e.getAxisValue(MotionEvent.AXIS_X); p.ly = -e.getAxisValue(MotionEvent.AXIS_Y);
+                p.rx = stickAxis(e, d, MotionEvent.AXIS_Z, MotionEvent.AXIS_RX); p.ry = -stickAxis(e, d, MotionEvent.AXIS_RZ, MotionEvent.AXIS_RY);
+                float hx = e.getAxisValue(MotionEvent.AXIS_HAT_X), hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y);
+                float lt = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE));
+                float rt = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS));
+                p.axisKeys = (hx < -0.5f ? PAD_LEFT : 0) | (hx > 0.5f ? PAD_RIGHT : 0) | (hy < -0.5f ? PAD_UP : 0) | (hy > 0.5f ? PAD_DOWN : 0)
+                    | (lt > 0.5f ? PAD_ZL : 0) | (rt > 0.5f ? PAD_ZR : 0);
+                sendPad(e.getDeviceId(), p);
+            }
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(e);
+    }
+
     private void updateRefresh() {
         if (libraryLoaded) nativeRefresh(view.getDisplay() == null ? 0 : view.getDisplay().getRefreshRate());
     }
@@ -390,11 +486,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }
     @Override public void onDisplayChanged(int id) { updateRefresh(); }
     @Override protected void onResume() { super.onResume(); resumed = true; immersive(); startHost(); updateRefresh(); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
-    @Override protected void onPause() { resumed = false; if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
+    @Override protected void onPause() { resumed = false; if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); releasePads(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
     @Override protected void onStart() { super.onStart(); if (started) nativeFocus(2); }
     @Override protected void onStop() { if (started) nativeFocus(1); com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
-    @Override protected void onDestroy() { if (displays != null) displays.unregisterDisplayListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
-    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersive(); else releaseTouches(); }
+    @Override protected void onDestroy() { if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(padDevices); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
+    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersive(); else { releaseTouches(); releasePads(); } }
 
     @Override public void surfaceCreated(SurfaceHolder h) {}
     @Override public void surfaceChanged(SurfaceHolder h, int format, int w, int ht) {

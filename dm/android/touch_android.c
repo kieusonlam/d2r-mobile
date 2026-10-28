@@ -15,6 +15,13 @@
 uint64_t now_ns(void);
 void dm_uiscreen_set_panel(int panel);
 void dm_tp_request(void);
+/* 手柄（gamepad_android.c）：手柄模式下不画控件；碰屏幕切回触屏模式，这一下只做这件事（同 iOS front_ios.m touchesBegan）。
+   Controller (gamepad_android.c): no controls are drawn in controller mode; touching the screen switches back to touch mode and that touch does
+   nothing else (as iOS front_ios.m touchesBegan). */
+int dm_gamepad_mode(void);
+void dm_gamepad_touched(void);
+int dm_padmode_busy(void);
+static uint32_t pad_swallow;   /* 被吞掉的手指（槽位掩码），抬起 / 取消前都不交出 | Swallowed fingers (slot mask), withheld until lifted / cancelled */
 /* 绑定观测桥未接入时不捏造技能绑定；基础键位仍走共用状态机。 | Do not fabricate skill bindings if the observation bridge is absent; basic keys still use the shared state machine. */
 void dm_touch_game_set_scene(int game, uint64_t scene, uint64_t world) __attribute__((weak));
 
@@ -109,6 +116,16 @@ void dm_android_touch_focus(int active) {
 }
 void dm_android_touch_event(int phase, int slot, float x, float y) {
     if (phase < 0 || phase > 3 || slot < 0 || slot >= DM_TC_MAX_TOUCH || !isfinite(x) || !isfinite(y)) return;
+    if (phase == 0) {
+        /* 手柄模式下落下的手指，或切换事务进行中落下的手指（控件层还没露出来）：整根不执行
+           A finger landing in controller mode, or while a switch transaction is in progress (the controls are not shown yet): withheld entirely */
+        int was_pad = dm_gamepad_mode(); dm_gamepad_touched();
+        if (was_pad || dm_padmode_busy()) { __atomic_or_fetch(&pad_swallow, 1u << slot, __ATOMIC_RELAXED); return; }
+    }
+    if (__atomic_load_n(&pad_swallow, __ATOMIC_RELAXED) & (1u << slot)) {
+        if (phase >= 2) __atomic_and_fetch(&pad_swallow, ~(1u << slot), __ATOMIC_RELAXED);
+        return;
+    }
     pthread_mutex_lock(&lock);
     if (focused) {
         /* 溢出只取消，绝不遗留按住的摇杆/按键。 | Overflow cancels instead of leaving a stick/key held. */
@@ -133,6 +150,10 @@ void dm_android_touch_uimsg(const char *cat, const char *act, const char *arg) {
         ++epoch; if (before.game != scene.game) ++world;
         cancel_locked(); head = tail = 0;
     }
+    /* 同 iOS front_ios.m：手柄 / 触屏布局重建过（dm_padmode.c）就换 world，HUD 控件全换了，技能钮快照重新认 HUD（不换的话切回触屏后技能钮一直空着）
+       As iOS front_ios.m: when the controller / touch layouts were rebuilt (dm_padmode.c) the world changes, since every HUD widget was replaced and the
+       skill-button snapshot must identify the HUD again (without this the skill buttons stay empty after switching back to touch) */
+    { uint32_t dm_padmode_rebuilds(void); static uint32_t rb0; uint32_t rb = dm_padmode_rebuilds(); if (rb != rb0) { rb0 = rb; ++world; } }
     int fe = !scene.game && touch_overlay();
     if (fe != frontend) { cancel_locked(); head = tail = 0; frontend = fe; }
     dm_tc_set_navigation_mode(&tc, nav);
@@ -390,7 +411,7 @@ void dm_android_touch_layout(float out[DM_ANDROID_TOUCH_DRAW_FLOATS]) {
                 if (i>=14 && f->target==DM_TC_DIFF && hypotf(f->x-t.x,f->y-t.y)<=t.r) p[4]=1;
             }
         }
-        if (frontend) p[3]=0;   /* 前端页面不画控件（见 frontend） | No controls drawn on front-end pages (see frontend) */
+        if (frontend || dm_gamepad_mode()) p[3]=0;   /* 前端页面 / 手柄模式不画控件 | No controls drawn on front-end pages or in controller mode */
     }
     dm_tg_snapshot native; dm_touch_game_snapshot(&native);
     for (int i=0;i<6;++i) {
@@ -406,7 +427,7 @@ void dm_android_touch_layout(float out[DM_ANDROID_TOUCH_DRAW_FLOATS]) {
     }
     dm_hud_info h; dm_hud_get(&h);
     float *hud=out+DM_ANDROID_TOUCH_HUD;
-    hud[0]=!frontend && dm_hud_bar_visible(&h,tc.navigation_mode && !dm_tc_scene_dialog_only(&scene),hud_blocked>0);
+    hud[0]=!frontend && !dm_gamepad_mode() && dm_hud_bar_visible(&h,tc.navigation_mode && !dm_tc_scene_dialog_only(&scene),hud_blocked>0);
     hud[1]=h.level; hud[2]=h.exp_permille;
     for (int i=0;i<4;++i) hud[3+i]=h.belt[i];
     hud[7]=h.players; hud[8]=h.hp; hud[9]=h.hp_max; hud[10]=h.mp; hud[11]=h.mp_max;
