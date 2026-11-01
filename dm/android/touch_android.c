@@ -15,13 +15,6 @@
 uint64_t now_ns(void);
 void dm_uiscreen_set_panel(int panel);
 void dm_tp_request(void);
-/* 手柄（gamepad_android.c）：手柄模式下不画控件；碰屏幕切回触屏模式，这一下只做这件事（同 iOS front_ios.m touchesBegan）。
-   Controller (gamepad_android.c): no controls are drawn in controller mode; touching the screen switches back to touch mode and that touch does
-   nothing else (as iOS front_ios.m touchesBegan). */
-int dm_gamepad_mode(void);
-void dm_gamepad_touched(void);
-int dm_padmode_busy(void);
-static uint32_t pad_swallow;   /* 被吞掉的手指（槽位掩码），抬起 / 取消前都不交出 | Swallowed fingers (slot mask), withheld until lifted / cancelled */
 /* 绑定观测桥未接入时不捏造技能绑定；基础键位仍走共用状态机。 | Do not fabricate skill bindings if the observation bridge is absent; basic keys still use the shared state machine. */
 void dm_touch_game_set_scene(int game, uint64_t scene, uint64_t world) __attribute__((weak));
 
@@ -116,16 +109,6 @@ void dm_android_touch_focus(int active) {
 }
 void dm_android_touch_event(int phase, int slot, float x, float y) {
     if (phase < 0 || phase > 3 || slot < 0 || slot >= DM_TC_MAX_TOUCH || !isfinite(x) || !isfinite(y)) return;
-    if (phase == 0) {
-        /* 手柄模式下落下的手指，或切换事务进行中落下的手指（控件层还没露出来）：整根不执行
-           A finger landing in controller mode, or while a switch transaction is in progress (the controls are not shown yet): withheld entirely */
-        int was_pad = dm_gamepad_mode(); dm_gamepad_touched();
-        if (was_pad || dm_padmode_busy()) { __atomic_or_fetch(&pad_swallow, 1u << slot, __ATOMIC_RELAXED); return; }
-    }
-    if (__atomic_load_n(&pad_swallow, __ATOMIC_RELAXED) & (1u << slot)) {
-        if (phase >= 2) __atomic_and_fetch(&pad_swallow, ~(1u << slot), __ATOMIC_RELAXED);
-        return;
-    }
     pthread_mutex_lock(&lock);
     if (focused) {
         /* 溢出只取消，绝不遗留按住的摇杆/按键。 | Overflow cancels instead of leaving a stick/key held. */
@@ -232,7 +215,6 @@ static int direct_begin(const touch_event *e) {
         if (band<30) band=fminf(30,h*.4f);
         if (e->x>=r[0]*width && e->x<=r[2]*width && e->y>=r[1]*height && e->y<=r[1]*height+band) kind=2;
     }
-    if (!kind && target<0 && dm_ui_map_is_full() && !(e->x<tc.layout.joy_zone_r && e->y>=tc.layout.joy_zone_t)) kind=3;
     if (!kind) return 0;
     direct[e->slot]=(direct_gesture){kind,e->x,e->y,e->time,key}; return 1;
 }
@@ -308,7 +290,7 @@ void dm_android_touch_step(uint64_t guest_now, uint64_t *buttons, int32_t *lx, i
         if (e.phase == 0) latched[e.slot] = 0;
         if (e.phase == 0) {
             if (dm_tc_belt_outside(&tc,e.x,e.y)) { dm_belt_expand(0); continue; }
-            { int dm_cam_mode(void); tc.cam_on = dm_cam_mode(); }   /* 镜头实验：右半屏拖动看四周要知道档 | camera experiment: looking around on the right half needs the mode */
+            { int dm_cam_mode(void), dm_cam_style(void); tc.cam_on = dm_cam_mode(); tc.cam_orbit = dm_cam_style() == 1; }   /* 镜头实验：右半屏拖动看四周要知道档 | camera experiment: looking around on the right half needs the mode */
             dm_tc_begin_at(&tc,e.slot,e.x,e.y,e.time);
             if (!tc.navigation_mode && f->target == DM_TC_PORTAL) { dm_tc_cancel_finger(&tc,e.slot); dm_tp_request(); }
             if (tc.navigation_mode && tc.pointer_slot == e.slot) dm_tc_pointer_item(&tc,dm_ui_item_at_now(e.x/width,e.y/height));
@@ -413,7 +395,7 @@ void dm_android_touch_layout(float out[DM_ANDROID_TOUCH_DRAW_FLOATS]) {
                 if (i>=14 && f->target==DM_TC_DIFF && hypotf(f->x-t.x,f->y-t.y)<=t.r) p[4]=1;
             }
         }
-        if (frontend || dm_gamepad_mode()) p[3]=0;   /* 前端页面 / 手柄模式不画控件 | No controls drawn on front-end pages or in controller mode */
+        if (frontend) p[3]=0;   /* 前端页面不画控件（见 frontend） | No controls drawn on front-end pages (see frontend) */
     }
     dm_tg_snapshot native; dm_touch_game_snapshot(&native);
     for (int i=0;i<6;++i) {
@@ -429,7 +411,7 @@ void dm_android_touch_layout(float out[DM_ANDROID_TOUCH_DRAW_FLOATS]) {
     }
     dm_hud_info h; dm_hud_get(&h);
     float *hud=out+DM_ANDROID_TOUCH_HUD;
-    hud[0]=!frontend && !dm_gamepad_mode() && dm_hud_bar_visible(&h,tc.navigation_mode && !dm_tc_scene_dialog_only(&scene),hud_blocked>0);
+    hud[0]=!frontend && dm_hud_bar_visible(&h,tc.navigation_mode && !dm_tc_scene_dialog_only(&scene),hud_blocked>0);
     hud[1]=h.level; hud[2]=h.exp_permille;
     for (int i=0;i<4;++i) hud[3+i]=h.belt[i];
     hud[7]=h.players; hud[8]=h.hp; hud[9]=h.hp_max; hud[10]=h.mp; hud[11]=h.mp_max;
